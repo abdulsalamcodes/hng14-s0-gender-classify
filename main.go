@@ -111,7 +111,19 @@ func classifyHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(map[string]string{
+		"name":    "Gender Classify API",
+		"author":  "Abdulsalam Elhakamy",
+		"version": "1.0.0",
+		"usage":   "GET /api/classify?name=<name>",
+	})
+}
+
 func main() {
+	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/api/classify", classifyHandler)
 	log.Println("Server running on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
