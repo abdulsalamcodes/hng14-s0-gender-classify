@@ -1,0 +1,16 @@
+# Environment
+.env
+
+# Binary output
+hng14-s0-gender-classify
+*.exe
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Test cache
+*.test
