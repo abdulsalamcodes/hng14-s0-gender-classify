@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -163,6 +164,24 @@ func (h *Handler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 	filter.Page = page
 	filter.Limit = limit
 
+	// Validate filter values
+	if filter.MinAge != nil && *filter.MinAge < 0 {
+		writeError(w, "Invalid query parameters", http.StatusBadRequest)
+		return
+	}
+	if filter.MaxAge != nil && *filter.MaxAge < 0 {
+		writeError(w, "Invalid query parameters", http.StatusBadRequest)
+		return
+	}
+	if filter.MinGenderProbability != nil && (*filter.MinGenderProbability < 0 || *filter.MinGenderProbability > 1) {
+		writeError(w, "Invalid query parameters", http.StatusBadRequest)
+		return
+	}
+	if filter.MinCountryProbability != nil && (*filter.MinCountryProbability < 0 || *filter.MinCountryProbability > 1) {
+		writeError(w, "Invalid query parameters", http.StatusBadRequest)
+		return
+	}
+
 	result, err := h.service.ListProfiles(r.Context(), filter)
 	if err != nil {
 		log.Printf("Error listing profiles: %v", err)
@@ -188,24 +207,45 @@ func (h *Handler) SearchProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter := services.ParseSearchQuery(q)
+	filter, err := services.ParseSearchQuery(q)
+	if err != nil {
+		if errors.Is(err, services.ErrUnableToParseQuery) {
+			writeError(w, "Invalid query parameters", http.StatusBadRequest)
+			return
+		}
+		writeError(w, "Failed to parse query", http.StatusBadRequest)
+		return
+	}
 
 	page := 1
 	limit := 10
 	if p := r.URL.Query().Get("page"); p != "" {
 		var parsed int
-		if _, err := fmt.Sscanf(p, "%d", &parsed); err == nil && parsed > 0 {
-			page = parsed
+		if _, err := fmt.Sscanf(p, "%d", &parsed); err != nil {
+			writeError(w, "Invalid query parameters", http.StatusBadRequest)
+			return
 		}
+		if parsed <= 0 {
+			writeError(w, "Invalid query parameters", http.StatusBadRequest)
+			return
+		}
+		page = parsed
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
 		var parsed int
-		if _, err := fmt.Sscanf(l, "%d", &parsed); err == nil && parsed > 0 {
-			if parsed > 50 {
-				parsed = 50
-			}
-			limit = parsed
+		if _, err := fmt.Sscanf(l, "%d", &parsed); err != nil {
+			writeError(w, "Invalid query parameters", http.StatusBadRequest)
+			return
 		}
+		if parsed <= 0 {
+			writeError(w, "Invalid query parameters", http.StatusBadRequest)
+			return
+		}
+		if parsed > 50 {
+			writeError(w, "Invalid query parameters", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
 	}
 	filter.Page = page
 	filter.Limit = limit

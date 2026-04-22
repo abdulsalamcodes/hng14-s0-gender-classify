@@ -1,12 +1,16 @@
 package services
 
 import (
+	"errors"
 	"strings"
 
 	"hng14-s0-gender-classify/internal/repository"
 )
 
-func ParseSearchQuery(q string) repository.ProfileFilter {
+// ErrUnableToParseQuery is returned when the natural language query cannot be interpreted.
+var ErrUnableToParseQuery = errors.New("unable to interpret query")
+
+func ParseSearchQuery(q string) (repository.ProfileFilter, error) {
 	q = strings.ToLower(q)
 	filter := repository.ProfileFilter{
 		Page: 1,
@@ -99,7 +103,38 @@ func ParseSearchQuery(q string) repository.ProfileFilter {
 	filter.SortBy = "created_at"
 	filter.Order = "desc"
 
-	return filter
+	// Check if any search constraint was set
+	if filterIsEmpty(filter) {
+		return repository.ProfileFilter{}, ErrUnableToParseQuery
+	}
+
+	return filter, nil
+}
+
+// filterIsEmpty returns true if the filter has no meaningful search constraints.
+func filterIsEmpty(f repository.ProfileFilter) bool {
+	if f.Gender != "" {
+		return false
+	}
+	if f.AgeGroup != "" {
+		return false
+	}
+	if f.CountryID != "" {
+		return false
+	}
+	if f.MinAge != nil {
+		return false
+	}
+	if f.MaxAge != nil {
+		return false
+	}
+	if f.MinGenderProbability != nil {
+		return false
+	}
+	if f.MinCountryProbability != nil {
+		return false
+	}
+	return true
 }
 
 func isGender(word string) bool {
