@@ -14,3 +14,4 @@ hng14-s0-gender-classify
 
 # Test cache
 *.test
+bin/
