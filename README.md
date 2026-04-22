@@ -1,4 +1,4 @@
-# hng14-s0-gender-classify
+# Gender Classify API
 
 A REST API that classifies names by gender, age, and nationality — built for HNG Internship 14, Backend Track.
 
@@ -6,9 +6,14 @@ It wraps [Genderize.io](https://genderize.io), [Agify.io](https://agify.io), and
 
 ---
 
-## Getting started
+## Getting Started
 
-**Prerequisites:** Go 1.21+, PostgreSQL
+### Prerequisites
+
+- Go 1.26+
+- PostgreSQL
+
+### Setup
 
 1. Clone and enter the repo:
 
@@ -23,13 +28,53 @@ cd hng14-s0-gender-classify
 DATABASE_URL=postgres://user:password@localhost:5432/yourdb
 ```
 
-3. Run:
+3. Build and run:
 
 ```bash
-go run main.go
+go build -o bin/api ./cmd/api
+./bin/api
+```
+
+Or run directly:
+
+```bash
+go run ./cmd/api
 ```
 
 Server starts on port `8080`.
+
+### Seed Database
+
+To populate the database with sample profiles:
+
+```bash
+# First, ensure the table has the correct schema (run if table exists without country_name column):
+psql $DATABASE_URL -c "ALTER TABLE profiles ADD COLUMN country_name VARCHAR(255) NOT NULL DEFAULT '';"
+psql $DATABASE_URL -c "ALTER TABLE profiles ADD CONSTRAINT profiles_name_key UNIQUE (name);"
+
+# Then seed:
+go run ./cmd/seed
+```
+
+Seeding is **idempotent** — safe to run multiple times (duplicates are skipped).
+
+---
+
+## Database Schema
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | UUID | Primary key |
+| `name` | VARCHAR(255) | Unique person's full name |
+| `gender` | VARCHAR(10) | "male" or "female" |
+| `gender_probability` | FLOAT | Confidence score (0-1) |
+| `sample_size` | INT | Data points used for prediction |
+| `age` | INT | Exact age |
+| `age_group` | VARCHAR(20) | child, teenager, adult, senior |
+| `country_id` | VARCHAR(2) | ISO country code (NG, BJ, etc.) |
+| `country_name` | VARCHAR(255) | Full country name |
+| `country_probability` | FLOAT | Confidence score (0-1) |
+| `created_at` | TIMESTAMP | Auto-generated |
 
 ---
 
@@ -43,10 +88,10 @@ Returns API metadata.
 
 ```json
 {
-  "author": "Abdulsalam Elhakamy",
   "name": "Gender Classify API",
-  "usage": "GET /api/classify?name=<name> | POST /api/profile",
-  "version": "1.0.0"
+  "author": "Abdulsalam Elhakamy",
+  "version": "1.0.0",
+  "usage": "GET /api/classify?name=<name> | POST /api/profile"
 }
 ```
 
@@ -62,13 +107,13 @@ Classify a name by gender using Genderize.io.
 |------|------|----------|-------------|
 | `name` | string | Yes | The name to classify |
 
-**Example request**
+**Example**
 
 ```
 GET /api/classify?name=james
 ```
 
-**Success response (200)**
+**Response (200)**
 
 ```json
 {
@@ -84,19 +129,11 @@ GET /api/classify?name=james
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `gender` | `"male"` or `"female"` |
-| `probability` | Confidence score from Genderize.io (0–1) |
-| `sample_size` | Number of data points used for the prediction |
-| `is_confident` | `true` when `probability >= 0.7` AND `sample_size >= 100` |
-| `processed_at` | UTC timestamp of when this request was processed (ISO 8601) |
-
 ---
 
 ### `POST /api/profiles`
 
-Create a demographic profile for a name. Calls Genderize, Agify, and Nationalize concurrently, then persists the result. Idempotent — returns the existing profile if one already exists for that name.
+Create a demographic profile for a name. Calls Genderize, Agify, and Nationalize concurrently, then persists the result. **Idempotent** — returns the existing profile if one already exists.
 
 **Request body**
 
@@ -104,7 +141,7 @@ Create a demographic profile for a name. Calls Genderize, Agify, and Nationalize
 { "name": "james" }
 ```
 
-**Success response (201)**
+**Response (201)**
 
 ```json
 {
@@ -118,44 +155,132 @@ Create a demographic profile for a name. Calls Genderize, Agify, and Nationalize
     "age": 62,
     "age_group": "senior",
     "country_id": "US",
+    "country_name": "United States",
     "country_probability": 0.08,
     "created_at": "2026-04-15T10:00:00Z"
   }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `id` | UUID of the stored profile |
-| `age_group` | `"child"` (≤12), `"teenager"` (13–19), `"adult"` (20–59), `"senior"` (60+) |
-| `country_id` | ISO 3166-1 alpha-2 code of the most probable country |
-
 ---
 
 ### `GET /api/profiles`
 
-List all profiles. Supports optional filtering.
+List all profiles with filtering, sorting, and pagination.
 
-**Query parameters (all optional)**
+**Filtering Parameters**
 
-| Name | Description |
-|------|-------------|
-| `gender` | Filter by gender (case-insensitive) |
-| `country_id` | Filter by country code (case-insensitive) |
-| `age_group` | Filter by age group (case-insensitive) |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `gender` | string | Filter by gender (male/female) |
+| `age_group` | string | Filter by age group (child/teenager/adult/senior) |
+| `country_id` | string | Filter by country ISO code |
+| `min_age` | int | Minimum age |
+| `max_age` | int | Maximum age |
+| `min_gender_probability` | float | Minimum gender probability (0-1) |
+| `min_country_probability` | float | Minimum country probability (0-1) |
 
-**Example request**
+**Sorting Parameters**
 
-```
-GET /api/profiles?gender=female&country_id=NG
-```
+| Parameter | Values | Default |
+|-----------|--------|---------|
+| `sort_by` | `age`, `created_at`, `gender_probability` | `created_at` |
+| `order` | `asc`, `desc` | `desc` |
 
-**Success response (200)**
+**Pagination Parameters**
+
+| Parameter | Default | Max | Description |
+|-----------|---------|-----|-------------|
+| `page` | 1 | - | Page number |
+| `limit` | 10 | 50 | Items per page |
+
+**Response (200)**
 
 ```json
 {
   "status": "success",
-  "count": 2,
+  "page": 1,
+  "limit": 10,
+  "total": 2026,
+  "data": [...]
+}
+```
+
+**Example Requests**
+
+```bash
+# Filter by gender and country
+curl "http://localhost:8080/api/profiles?gender=male&country_id=NG"
+
+# Age range with sorting
+curl "http://localhost:8080/api/profiles?min_age=25&max_age=40&sort_by=age&order=desc"
+
+# Probability filters
+curl "http://localhost:8080/api/profiles?min_gender_probability=0.8&min_country_probability=0.5"
+
+# Combined filters, sorting, and pagination
+curl "http://localhost:8080/api/profiles?gender=female&country_id=KE&min_age=20&sort_by=gender_probability&order=desc&page=2&limit=25"
+```
+
+---
+
+### `GET /api/profiles/search`
+
+Natural language search — convert plain English queries into filters.
+
+**Query Parameters**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `q` | string | Yes | Natural language query |
+| `page` | int | No | Page number (default: 1) |
+| `limit` | int | No | Items per page (default: 10, max: 50) |
+
+**Supported Patterns**
+
+| Pattern | Mapping |
+|---------|---------|
+| `male`, `males`, `men`, `man`, `boys` | gender=male |
+| `female`, `females`, `women`, `woman`, `girls` | gender=female |
+| `child`, `children`, `kid`, `kids` | age_group=child |
+| `teenager`, `teens`, `teen` | age_group=teenager |
+| `adult`, `adults`, `grown` | age_group=adult |
+| `senior`, `elder`, `elderly`, `old` | age_group=senior |
+| `young`, `youth` | age=16-24 |
+| `above 30`, `over 30`, `older than 30` | min_age=30 |
+| `below 30`, `under 30`, `younger than 30` | max_age=30 |
+| `from Nigeria`, `in Kenya` | country_id=NG, country_id=KE |
+
+**Example Queries**
+
+```bash
+# Young males
+curl "http://localhost:8080/api/profiles/search?q=young+males"
+
+# Females above 30
+curl "http://localhost:8080/api/profiles/search?q=females+above+30"
+
+# People from Angola
+curl "http://localhost:8080/api/profiles/search?q=people+from+angola"
+
+# Adult males from Kenya
+curl "http://localhost:8080/api/profiles/search?q=adult+males+from+kenya"
+
+# Teenagers above 17
+curl "http://localhost:8080/api/profiles/search?q=teenagers+above+17"
+
+# With pagination
+curl "http://localhost:8080/api/profiles/search?q=males+from+ghana&page=2&limit=20"
+```
+
+**Response (200)**
+
+```json
+{
+  "status": "success",
+  "page": 1,
+  "limit": 10,
+  "total": 45,
   "data": [...]
 }
 ```
@@ -166,9 +291,9 @@ GET /api/profiles?gender=female&country_id=NG
 
 Retrieve a single profile by UUID.
 
-**Success response (200)** — same shape as `POST /api/profiles`.
+**Response (200)** — same shape as `POST /api/profiles`
 
-**Error:** `404 Not Found` if no profile with that ID exists.
+**Error (404)** — Profile not found
 
 ---
 
@@ -176,45 +301,58 @@ Retrieve a single profile by UUID.
 
 Delete a profile by UUID.
 
-**Success response (204 No Content)**
+**Response (204)** — No content
 
-**Error:** `404 Not Found` if no profile with that ID exists.
+**Error (404)** — Profile not found
 
 ---
 
-## Error responses
+## Error Responses
 
 All errors share the same shape:
 
 ```json
 {
   "status": "error",
-  "message": "<description of what went wrong>"
+  "message": "Description of what went wrong"
 }
 ```
 
-| Scenario | Status code |
+| Scenario | Status Code |
 |----------|-------------|
-| Missing or invalid request parameter | `400 Bad Request` |
-| No prediction available for the name | `404 Not Found` |
+| Missing or invalid parameter | `400 Bad Request` |
+| No prediction available for name | `404 Not Found` |
 | Profile not found | `404 Not Found` |
 | External API unreachable | `502 Bad Gateway` |
 | Database error | `500 Internal Server Error` |
 
 ---
 
-## Running tests
+## Project Structure
 
-```bash
-go test ./...
 ```
-
-Tests use `httptest` to mock the external API — no network or database required.
+├── cmd/
+│   ├── api/main.go           # API server entry point
+│   └── seed/main.go          # Database seeding script
+├── internal/
+│   ├── config/               # Configuration handling
+│   ├── data/                 # Seed data (seed_profiles.json)
+│   ├── handlers/             # HTTP handlers
+│   ├── models/               # Data models and types
+│   ├── repository/           # Database operations
+│   └── services/             # Business logic and NL search
+├── pkg/
+│   └── api/                  # External API clients
+├── bin/                      # Compiled binaries
+├── go.mod
+└── go.sum
+```
 
 ---
 
-## Tech
+## Tech Stack
 
-- Language: Go 1.21+
-- Database: PostgreSQL (via `pgx/v5`)
-- External APIs: [Genderize.io](https://genderize.io), [Agify.io](https://agify.io), [Nationalize.io](https://nationalize.io)
+- **Language:** Go 1.26+
+- **Router:** Chi v5
+- **Database:** PostgreSQL (via pgx/v5)
+- **External APIs:** [Genderize.io](https://genderize.io), [Agify.io](https://agify.io), [Nationalize.io](https://nationalize.io)

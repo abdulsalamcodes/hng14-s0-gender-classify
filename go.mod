@@ -1,4 +1,4 @@
-module github.com/abdulsalamcodes/hng14-s1-gender-classify.git
+module hng14-s0-gender-classify
 
 go 1.26.1
 
@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/go-chi/chi/v5 v5.2.5 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
