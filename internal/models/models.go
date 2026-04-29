@@ -64,11 +64,13 @@ type ProfileResponse struct {
 }
 
 type ProfileListResponse struct {
-	Status string           `json:"status"`
-	Page   int              `json:"page"`
-	Limit  int              `json:"limit"`
-	Total  int              `json:"total"`
-	Data   []ProfilePayload `json:"data"`
+	Status     string           `json:"status"`
+	Page       int              `json:"page"`
+	Limit      int              `json:"limit"`
+	Total      int              `json:"total"`
+	TotalPages int              `json:"total_pages"`
+	Links      map[string]*string `json:"links"`
+	Data       []ProfilePayload `json:"data"`
 }
 
 type RootResponse struct {
@@ -92,3 +94,20 @@ type SeedProfile struct {
 type SeedData struct {
 	Profiles []SeedProfile `json:"profiles"`
 }
+
+type User struct {
+	ID             string    `json:"id"`
+	GithubID       string    `json:"github_id"`
+	Username       string    `json:"username"`
+	Email          string    `json:"email"`
+	AvatarURL      string    `json:"avatar_url"`
+	Role           string    `json:"role"`
+	IsActive       bool      `json:"is_active"`
+	LastLoginAt    time.Time `json:"last_login_at"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+
+
+
+

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"hng14-s0-gender-classify/internal/middleware"
 	"hng14-s0-gender-classify/internal/models"
 	"hng14-s0-gender-classify/internal/repository"
 	"hng14-s0-gender-classify/internal/services"
@@ -192,11 +194,13 @@ func (h *Handler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(models.ProfileListResponse{
-		Status: "success",
-		Page:   page,
-		Limit:  limit,
-		Total:  result.Total,
-		Data:   result.Data,
+		Status:     "success",
+		Page:       page,
+		Limit:      limit,
+		Total:      result.Total,
+		TotalPages: result.TotalPages,
+		Links:      result.Links,
+		Data:       result.Data,
 	})
 }
 
@@ -260,11 +264,13 @@ func (h *Handler) SearchProfiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(models.ProfileListResponse{
-		Status: "success",
-		Page:   page,
-		Limit:  limit,
-		Total:  result.Total,
-		Data:   result.Data,
+		Status:     "success",
+		Page:       page,
+		Limit:      limit,
+		Total:      result.Total,
+		TotalPages: result.TotalPages,
+		Links:      result.Links,
+		Data:       result.Data,
 	})
 }
 
@@ -295,8 +301,97 @@ func (h *Handler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) ExportProfiles(w http.ResponseWriter, r *http.Request) {
+	filter := repository.ProfileFilter{
+		Gender:    r.URL.Query().Get("gender"),
+		AgeGroup:  r.URL.Query().Get("age_group"),
+		CountryID: r.URL.Query().Get("country_id"),
+	}
+
+	if minAge := r.URL.Query().Get("min_age"); minAge != "" {
+		var val int
+		if _, err := fmt.Sscanf(minAge, "%d", &val); err == nil {
+			filter.MinAge = &val
+		}
+	}
+	if maxAge := r.URL.Query().Get("max_age"); maxAge != "" {
+		var val int
+		if _, err := fmt.Sscanf(maxAge, "%d", &val); err == nil {
+			filter.MaxAge = &val
+		}
+	}
+
+	filter.SortBy = r.URL.Query().Get("sort_by")
+	filter.Order = r.URL.Query().Get("order")
+
+	// Set high limit to get all matching profiles
+	filter.Page = 1
+	filter.Limit = 10000
+
+	result, err := h.service.ListProfiles(r.Context(), filter)
+	if err != nil {
+		log.Printf("Error exporting profiles: %v", err)
+		writeError(w, "Failed to export profiles", http.StatusInternalServerError)
+		return
+	}
+
+	// Generate CSV
+	now := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("profiles_%s.csv", now)
+
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	
+	// Write CSV header
+	fmt.Fprintln(w, "id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at")
+	
+	// Write CSV rows
+	for _, p := range result.Data {
+		fmt.Fprintf(w, "%s,%s,%s,%.2f,%d,%s,%s,%s,%.2f,%s\n",
+			p.ID, p.Name, p.Gender, p.GenderProbability, p.Age, p.AgeGroup,
+			p.CountryID, p.CountryName, p.CountryProbability, p.CreatedAt.Format(time.RFC3339))
+	}
+}
+
+// auth middleware. //Access Control
+// All /api/* endpoints must:
+// Require authentication
+// Enforce role permissions
+// Do not implement scattered checks; use a structured approach.
+
+
+
+
+// auth/github -> GitHub login
+
+// auth/github/callback -> GitHub callback
+
+// auth/refresh -> Token refresh
+
+// auth/logout
+
+// users 
+
 func writeError(w http.ResponseWriter, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: message})
 }
+
+
+func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		writeError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "success",
+		"user_id": claims.UserID,
+		"role": claims.Role,
+	})
+}
+
+// main.go -> handlers -> services -> repository -> database

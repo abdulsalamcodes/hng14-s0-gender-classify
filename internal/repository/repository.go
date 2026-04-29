@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"hng14-s0-gender-classify/internal/models"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"hng14-s0-gender-classify/internal/models"
 )
 
 type Repository struct {
@@ -31,7 +32,30 @@ func (r *Repository) InitSchema(ctx context.Context) error {
 			country_name VARCHAR(255) NOT NULL,
 			country_probability FLOAT NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW()
-		)
+		);
+
+		CREATE TABLE IF NOT EXISTS users (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			github_id VARCHAR(255) NOT NULL UNIQUE,
+			username VARCHAR(255) NOT NULL,
+			email VARCHAR(255),
+			avatar_url VARCHAR(255),
+			role VARCHAR(20) NOT NULL DEFAULT 'analyst',
+			is_active BOOLEAN NOT NULL DEFAULT TRUE,
+			last_login_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);
+
+		-- Stores hashed refresh tokens so we can invalidate them on logout.
+		-- We never store raw tokens; only SHA-256 hashes. This way a DB
+		-- breach doesn't expose usable tokens.
+		CREATE TABLE IF NOT EXISTS refresh_tokens (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			token_hash VARCHAR(64) NOT NULL UNIQUE,
+			expires_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);
 	`)
 	return err
 }
@@ -99,8 +123,10 @@ type ProfileFilter struct {
 }
 
 type PaginatedResult struct {
-	Data  []models.ProfilePayload
-	Total int
+	Data       []models.ProfilePayload
+	Total      int
+	TotalPages int
+	Links      map[string]*string
 }
 
 func (r *Repository) ListProfiles(ctx context.Context, filter ProfileFilter) (*PaginatedResult, error) {
@@ -202,7 +228,30 @@ func (r *Repository) ListProfiles(ctx context.Context, filter ProfileFilter) (*P
 		}
 		profiles = append(profiles, p)
 	}
-	return &PaginatedResult{Data: profiles, Total: total}, nil
+	totalPages := total / filter.Limit
+	if total%filter.Limit != 0 {
+		totalPages++
+	}
+
+	links := map[string]*string{}
+	self := fmt.Sprintf("/api/profiles?page=%d&limit=%d", filter.Page, filter.Limit)
+	links["self"] = &self
+
+	if filter.Page < totalPages {
+		next := fmt.Sprintf("/api/profiles?page=%d&limit=%d", filter.Page+1, filter.Limit)
+		links["next"] = &next
+	} else {
+		links["next"] = nil
+	}
+
+	if filter.Page > 1 {
+		prev := fmt.Sprintf("/api/profiles?page=%d&limit=%d", filter.Page-1, filter.Limit)
+		links["prev"] = &prev
+	} else {
+		links["prev"] = nil
+	}
+
+	return &PaginatedResult{Data: profiles, Total: total, TotalPages: totalPages, Links: links}, nil
 }
 
 func (r *Repository) CreateProfile(ctx context.Context, p *models.ProfilePayload) (*models.ProfilePayload, error) {
@@ -269,6 +318,115 @@ func (r *Repository) SeedProfile(ctx context.Context, p *models.SeedProfile) err
 
 func (r *Repository) Close() {
 	r.db.Close()
+}
+
+// ── User methods ─────────────────────────────────────────────────────────────
+
+// UpsertUser creates a new user or updates their profile on repeated GitHub
+// logins. The CONFLICT target is github_id (the numeric ID GitHub assigns;
+// it never changes even if the user renames themselves).
+func (r *Repository) UpsertUser(ctx context.Context, u *models.User) (*models.User, error) {
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO users (github_id, username, email, avatar_url, role, is_active, last_login_at)
+		VALUES ($1, $2, $3, $4, $5, TRUE, NOW())
+		ON CONFLICT (github_id) DO UPDATE
+			SET username      = EXCLUDED.username,
+			    email         = EXCLUDED.email,
+			    avatar_url    = EXCLUDED.avatar_url,
+			    last_login_at = NOW()
+		RETURNING id, github_id, username, COALESCE(email,''), COALESCE(avatar_url,''), role, is_active, last_login_at, created_at
+	`,
+		u.GithubID,
+		u.Username,
+		u.Email,
+		u.AvatarURL,
+		u.Role,
+	).Scan(
+		&u.ID,
+		&u.GithubID,
+		&u.Username,
+		&u.Email,
+		&u.AvatarURL,
+		&u.Role,
+		&u.IsActive,
+		&u.LastLoginAt,
+		&u.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// GetUserByID loads a user by their internal UUID (embedded in JWT claims).
+func (r *Repository) GetUserByID(ctx context.Context, id string) (*models.User, error) {
+	var u models.User
+	err := r.db.QueryRow(ctx, `
+		SELECT id, github_id, username, COALESCE(email,''), COALESCE(avatar_url,''), role, is_active, last_login_at, created_at
+		FROM users WHERE id = $1
+	`, id).Scan(
+		&u.ID,
+		&u.GithubID,
+		&u.Username,
+		&u.Email,
+		&u.AvatarURL,
+		&u.Role,
+		&u.IsActive,
+		&u.LastLoginAt,
+		&u.CreatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return &u, err
+}
+
+// ── Refresh token methods ─────────────────────────────────────────────────────
+
+// RefreshToken is the DB row shape for a stored (hashed) refresh token.
+type RefreshToken struct {
+	ID        string
+	UserID    string
+	TokenHash string
+	ExpiresAt interface{} // scanned as time.Time
+}
+
+// StoreRefreshToken persists a hashed refresh token.
+// We pass expiresAt as a time.Time so Postgres can enforce expiry in queries.
+func (r *Repository) StoreRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt interface{}) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+	`, userID, tokenHash, expiresAt)
+	return err
+}
+
+// GetRefreshToken looks up a stored token by its hash.
+// Returns nil if not found or already expired (we check expiry in SQL to be safe).
+func (r *Repository) GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error) {
+	var rt RefreshToken
+	err := r.db.QueryRow(ctx, `
+		SELECT id, user_id, token_hash, expires_at
+		FROM refresh_tokens
+		WHERE token_hash = $1 AND expires_at > NOW()
+	`, tokenHash).Scan(&rt.ID, &rt.UserID, &rt.TokenHash, &rt.ExpiresAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return &rt, err
+}
+
+// DeleteRefreshToken removes a single token (called on refresh rotation or logout).
+func (r *Repository) DeleteRefreshToken(ctx context.Context, tokenHash string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash)
+	return err
+}
+
+// DeleteUserRefreshTokens removes ALL tokens for a user.
+// Used on logout to ensure every existing session is invalidated.
+func (r *Repository) DeleteUserRefreshTokens(ctx context.Context, userID string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+	return err
 }
 
 func computeAgeGroup(age int) string {
