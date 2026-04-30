@@ -199,8 +199,8 @@ func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(services.AccessTokenDuration.Seconds()),
 	})
 
-	// Redirect to the web portal dashboard.
-	http.Redirect(w, r, h.frontendURL+"/dashboard", http.StatusTemporaryRedirect)
+	// Redirect to the web portal dashboard (hash-based routing).
+	http.Redirect(w, r, h.frontendURL+"/#dashboard", http.StatusTemporaryRedirect)
 }
 
 // Refresh issues a new access + refresh token pair given a valid refresh token.
