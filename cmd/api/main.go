@@ -64,9 +64,11 @@ func main() {
 	r := chi.NewRouter()
 
 	// Global middleware (applied to every request):
-	// 1. LoggingMiddleware — logs method/path/status/duration. Outermost so it
-	//    captures the full request lifetime including auth overhead.
-	// 2. Recoverer — catches panics and returns 500 instead of crashing.
+	// 1. CORS — must be first so preflight OPTIONS requests get headers before
+	//    any auth middleware short-circuits them.
+	// 2. LoggingMiddleware — logs method/path/status/duration.
+	// 3. Recoverer — catches panics and returns 500 instead of crashing.
+	r.Use(middleware.CORS(cfg.FrontendURL))
 	r.Use(middleware.LoggingMiddleware)
 	r.Use(chimiddleware.Recoverer)
 
@@ -83,10 +85,11 @@ func main() {
 		r.Get("/github", authH.GitHubLogin)
 		// GET /auth/github/callback — GitHub redirects here after user approves
 		r.Get("/github/callback", authH.GitHubCallback)
+		// POST /auth/cli-exchange — CLI sends code+verifier here to complete PKCE exchange
+		r.Post("/cli-exchange", authH.CLIExchange)
 		// POST /auth/refresh — rotates tokens; accepts JSON body or cookie
 		r.Post("/refresh", authH.Refresh)
 		// POST /auth/logout — invalidates all refresh tokens for the user
-		// RequireAuth here so we know WHO is logging out.
 		r.With(requireAuth).Post("/logout", authH.Logout)
 	})
 

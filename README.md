@@ -355,4 +355,136 @@ All errors share the same shape:
 - **Language:** Go 1.26+
 - **Router:** Chi v5
 - **Database:** PostgreSQL (via pgx/v5)
+- **Auth:** GitHub OAuth 2.0 + PKCE, JWT (golang-jwt/jwt/v5)
+- **Rate limiting:** go-chi/httprate
 - **External APIs:** [Genderize.io](https://genderize.io), [Agify.io](https://agify.io), [Nationalize.io](https://nationalize.io)
+
+---
+
+## Stage 3 — Authentication & Access Control
+
+### System Architecture
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   CLI Tool      │    │  Web Portal     │    │  Direct API     │
+│ (Bearer token)  │    │ (HTTP-only cookie│    │ (Bearer token)  │
+└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
+         │                     │                       │
+         └─────────────────────▼───────────────────────┘
+                        ┌──────────────┐
+                        │  Backend API │
+                        │  :8080       │
+                        └──────┬───────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+        ┌──────────┐   ┌─────────────┐   ┌──────────────┐
+        │ GitHub   │   │  PostgreSQL │   │ Genderize /  │
+        │  OAuth   │   │   (users,   │   │ Agify /      │
+        │          │   │   tokens,   │   │ Nationalize  │
+        └──────────┘   │   profiles) │   └──────────────┘
+                       └─────────────┘
+```
+
+### Authentication Flow
+
+#### Web Portal Flow
+1. User clicks "Continue with GitHub" → browser redirects to `GET /auth/github?source=web`
+2. Backend redirects to GitHub OAuth
+3. GitHub redirects to `GET /auth/github/callback?code=...&state=...`
+4. Backend exchanges code for GitHub access token, fetches user profile
+5. Backend sets **HTTP-only cookies** (`access_token`, `refresh_token`, `csrf_token`)
+6. Browser redirects to portal dashboard
+
+#### CLI Flow (PKCE)
+1. CLI generates `code_verifier` (random 32 bytes, base64url encoded)
+2. CLI computes `code_challenge = BASE64URL(SHA256(code_verifier))`
+3. CLI starts a temporary local HTTP server on a random port
+4. Browser opens to `GET /auth/github?source=cli&code_challenge=...&cli_redirect_uri=http://localhost:<port>/callback`
+5. Backend stores state → {challenge, cli_redirect_uri}; redirects to GitHub
+6. GitHub redirects to backend callback
+7. Backend (seeing source=cli) redirects to `http://localhost:<port>/callback?code=...`
+8. CLI local server captures the `code`
+9. CLI POSTs `{code, code_verifier}` to `POST /auth/cli-exchange`
+10. Backend exchanges with GitHub (PKCE verified), issues tokens, returns JSON
+11. CLI stores tokens at `~/.insighta/credentials.json`
+
+### Token Handling
+
+| Token | Duration | Storage | Purpose |
+|-------|----------|---------|---------|
+| Access token | **3 minutes** | JWT (signed HS256) | Authenticate API requests |
+| Refresh token | **5 minutes** | Random bytes (hashed SHA-256 in DB) | Obtain new token pair |
+
+**Token rotation:** Each refresh invalidates the old refresh token immediately and issues a new pair. Using an already-consumed refresh token returns 401.
+
+**Revocation:** Logout deletes all refresh tokens from the DB, making every active session immediately invalid.
+
+### Role Enforcement Logic
+
+```
+Request → LoggingMiddleware → CORS → Recoverer
+       → /auth/* : AuthRateLimit (10/min/IP)
+       → /api/*  : APIVersionMiddleware (X-API-Version: 1 required)
+                 → APIRateLimit (60/min/user)
+                 → RequireAuth (validates JWT, checks is_active in DB)
+                 → handler
+                    → RequireRole("admin") on POST /api/profiles
+                    → RequireRole("admin") on DELETE /api/profiles/:id
+```
+
+| Role | Permissions |
+|------|-------------|
+| `analyst` (default) | Read all profiles, search, export |
+| `admin` | All analyst permissions + create + delete |
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `GITHUB_CLIENT_ID` | Yes | OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | Yes | OAuth App client secret |
+| `GITHUB_REDIRECT_URL` | Yes | Must match OAuth App callback URL |
+| `JWT_SECRET` | Yes | Access token signing key (use `openssl rand -hex 32`) |
+| `JWT_REFRESH_SECRET` | Yes | Refresh token signing key |
+| `FRONTEND_URL` | Yes | Portal URL for post-OAuth redirect |
+| `PORT` | No | Server port (default: 8080) |
+
+### Auth Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/auth/github` | — | Start OAuth flow |
+| GET | `/auth/github/callback` | — | GitHub OAuth callback |
+| POST | `/auth/cli-exchange` | — | CLI PKCE token exchange |
+| POST | `/auth/refresh` | — | Rotate token pair |
+| POST | `/auth/logout` | Required | Revoke tokens |
+| GET | `/api/whoami` | Required | Current user info |
+
+### Rate Limits
+
+| Scope | Limit | Key |
+|-------|-------|-----|
+| `/auth/*` | 10 req/min | IP address |
+| `/api/*` | 60 req/min | User ID (JWT) |
+
+### Project Structure (Stage 3 additions)
+
+```
+internal/
+├── handlers/
+│   ├── handlers.go          # Profile CRUD + export + whoami
+│   └── auth_handlers.go     # OAuth flow, token management
+├── middleware/
+│   ├── middleware.go        # RequireAuth, RequireRole, APIVersionMiddleware
+│   ├── ratelimit.go         # AuthRateLimit, APIRateLimit
+│   ├── logging.go           # Request logger
+│   └── cors.go              # CORS for portal cross-origin requests
+├── services/
+│   ├── auth.go              # GitHub OAuth, token pair issuance/rotation
+│   └── tokens.go            # JWT issue/validate, refresh token generation
+└── repository/
+    └── repository.go        # users + refresh_tokens tables + queries
+```

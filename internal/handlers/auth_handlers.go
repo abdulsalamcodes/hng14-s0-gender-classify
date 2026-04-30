@@ -12,12 +12,14 @@ import (
 	"hng14-s0-gender-classify/internal/services"
 )
 
+
 // pendingState stores PKCE and source info while the user is on GitHub's login page.
 // We need to remember these between the initial redirect and the callback.
 type pendingState struct {
-	codeChallenge string // sent by CLI; empty for web flow
-	source        string // "cli" or "web"
-	expiresAt     time.Time
+	codeChallenge  string // sent by CLI; empty for web flow
+	source         string // "cli" or "web"
+	cliRedirectURI string // where the CLI's local server is listening (e.g. http://localhost:9876/callback)
+	expiresAt      time.Time
 }
 
 // stateStore is an in-memory store for pending OAuth states.
@@ -72,14 +74,16 @@ func (h *AuthHandler) GitHubLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state := hex.EncodeToString(stateBytes)
 
-	source := r.URL.Query().Get("source")           // "cli" or ""
-	codeChallenge := r.URL.Query().Get("code_challenge") // provided by CLI
+	source         := r.URL.Query().Get("source")           // "cli" or ""
+	codeChallenge  := r.URL.Query().Get("code_challenge")   // provided by CLI (base64url SHA256 of verifier)
+	cliRedirectURI := r.URL.Query().Get("cli_redirect_uri") // e.g. http://localhost:9876/callback
 
 	// Store state info so the callback can retrieve it.
 	stateStore.Store(state, pendingState{
-		codeChallenge: codeChallenge,
-		source:        source,
-		expiresAt:     time.Now().Add(10 * time.Minute), // states expire if unused
+		codeChallenge:  codeChallenge,
+		source:         source,
+		cliRedirectURI: cliRedirectURI,
+		expiresAt:      time.Now().Add(10 * time.Minute),
 	})
 
 	redirectURL := h.auth.GitHubAuthURL(state, codeChallenge)
@@ -118,12 +122,34 @@ func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The CLI sends code_verifier in the query when it hits the callback
-	// via the local server. For web flow, codeVerifier is "".
-	codeVerifier := r.URL.Query().Get("code_verifier")
+	if ps.source == "cli" {
+		// CLI path: redirect the browser to the CLI's local callback server,
+		// passing the code and state so the CLI can exchange them itself.
+		//
+		// Why not exchange here? The CLI holds code_verifier (the PKCE secret).
+		// The backend never sees it — this keeps PKCE meaningful. The CLI calls
+		// POST /auth/cli-exchange with {code, code_verifier, state} after
+		// receiving the redirect.
+		if ps.cliRedirectURI == "" {
+			writeError(w, "cli_redirect_uri missing from state", http.StatusBadRequest)
+			return
+		}
+		// Append code to the CLI's local server URL.
+		sep := "?"
+		if len(ps.cliRedirectURI) > 0 {
+			for _, c := range ps.cliRedirectURI {
+				if c == '?' {
+					sep = "&"
+					break
+				}
+			}
+		}
+		http.Redirect(w, r, ps.cliRedirectURI+sep+"code="+code+"&state="+state, http.StatusTemporaryRedirect)
+		return
+	}
 
-	// Exchange authorization code → user profile.
-	user, err := h.auth.ExchangeCodeForUser(r.Context(), code, codeVerifier)
+	// Web path: exchange code here (server holds the client_secret; no PKCE verifier needed).
+	user, err := h.auth.ExchangeCodeForUser(r.Context(), code, "")
 	if err != nil {
 		writeError(w, "authentication failed", http.StatusUnauthorized)
 		return
@@ -133,19 +159,6 @@ func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	accessToken, refreshToken, err := h.auth.IssueTokenPair(r.Context(), user)
 	if err != nil {
 		writeError(w, "failed to issue tokens", http.StatusInternalServerError)
-		return
-	}
-
-	if ps.source == "cli" {
-		// CLI path: return plain JSON with tokens.
-		// The CLI will store these in ~/.insighta/credentials.json.
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":        "success",
-			"access_token":  accessToken,
-			"refresh_token": refreshToken,
-			"username":      user.Username,
-		})
 		return
 	}
 
@@ -167,6 +180,23 @@ func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(services.RefreshTokenDuration.Seconds()),
+	})
+
+	// CSRF token: a readable (non-HttpOnly) cookie that JavaScript can read
+	// and send as the X-CSRF-Token header on state-changing requests.
+	// Because this token is also stored server-side via the signed access token,
+	// an attacker on another origin cannot read it (SameSite + HttpOnly on the
+	// main tokens ensures they can't forge requests with valid credentials).
+	csrfBytes := make([]byte, 16)
+	rand.Read(csrfBytes) //nolint:errcheck — rand.Read never errors
+	csrfToken := hex.EncodeToString(csrfBytes)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csrf_token",
+		Value:    csrfToken,
+		Path:     "/",
+		HttpOnly: false, // Must be JS-readable so the portal can send it as a header.
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(services.AccessTokenDuration.Seconds()),
 	})
 
 	// Redirect to the web portal dashboard.
@@ -225,6 +255,43 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		"status":        "success",
 		"access_token":  accessToken,
 		"refresh_token": refreshToken,
+	})
+}
+
+// CLIExchange is called by the CLI after GitHub redirects back to its local server.
+// POST /auth/cli-exchange
+// Body: { "code": "...", "code_verifier": "..." }
+//
+// The CLI holds code_verifier (never sent to GitHub directly).
+// Here the backend uses it to call GitHub's token endpoint and complete PKCE.
+func (h *AuthHandler) CLIExchange(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code         string `json:"code"`
+		CodeVerifier string `json:"code_verifier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" || body.CodeVerifier == "" {
+		writeError(w, "code and code_verifier required", http.StatusBadRequest)
+		return
+	}
+
+	user, err := h.auth.ExchangeCodeForUser(r.Context(), body.Code, body.CodeVerifier)
+	if err != nil {
+		writeError(w, "token exchange failed", http.StatusUnauthorized)
+		return
+	}
+
+	accessToken, refreshToken, err := h.auth.IssueTokenPair(r.Context(), user)
+	if err != nil {
+		writeError(w, "failed to issue tokens", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":        "success",
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"username":      user.Username,
 	})
 }
 
