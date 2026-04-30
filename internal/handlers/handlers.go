@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,15 +194,7 @@ func (h *Handler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(models.ProfileListResponse{
-		Status:     "success",
-		Page:       page,
-		Limit:      limit,
-		Total:      result.Total,
-		TotalPages: result.TotalPages,
-		Links:      result.Links,
-		Data:       result.Data,
-	})
+	json.NewEncoder(w).Encode(buildListResponse("profiles", r, page, limit, result.Total, result.Data))
 }
 
 func (h *Handler) SearchProfiles(w http.ResponseWriter, r *http.Request) {
@@ -263,15 +256,7 @@ func (h *Handler) SearchProfiles(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(models.ProfileListResponse{
-		Status:     "success",
-		Page:       page,
-		Limit:      limit,
-		Total:      result.Total,
-		TotalPages: result.TotalPages,
-		Links:      result.Links,
-		Data:       result.Data,
-	})
+	json.NewEncoder(w).Encode(buildListResponse("profiles/search", r, page, limit, result.Total, result.Data))
 }
 
 func (h *Handler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
@@ -301,13 +286,22 @@ func (h *Handler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ExportProfiles streams all matching profiles as a CSV file download.
+// GET /api/profiles/export?format=csv&gender=...&country_id=...&sort_by=...
+//
+// We use encoding/csv instead of fmt.Fprintf to correctly handle values
+// that contain commas or quotes (e.g. country names like "Korea, South").
 func (h *Handler) ExportProfiles(w http.ResponseWriter, r *http.Request) {
 	filter := repository.ProfileFilter{
 		Gender:    r.URL.Query().Get("gender"),
 		AgeGroup:  r.URL.Query().Get("age_group"),
 		CountryID: r.URL.Query().Get("country_id"),
+		SortBy:    r.URL.Query().Get("sort_by"),
+		Order:     r.URL.Query().Get("order"),
+		// Fetch all rows — no pagination for exports.
+		Page:  1,
+		Limit: 10000,
 	}
-
 	if minAge := r.URL.Query().Get("min_age"); minAge != "" {
 		var val int
 		if _, err := fmt.Sscanf(minAge, "%d", &val); err == nil {
@@ -321,13 +315,6 @@ func (h *Handler) ExportProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filter.SortBy = r.URL.Query().Get("sort_by")
-	filter.Order = r.URL.Query().Get("order")
-
-	// Set high limit to get all matching profiles
-	filter.Page = 1
-	filter.Limit = 10000
-
 	result, err := h.service.ListProfiles(r.Context(), filter)
 	if err != nil {
 		log.Printf("Error exporting profiles: %v", err)
@@ -335,50 +322,36 @@ func (h *Handler) ExportProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate CSV
-	now := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("profiles_%s.csv", now)
-
+	filename := fmt.Sprintf("profiles_%s.csv", time.Now().Format("20060102_150405"))
 	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-	
-	// Write CSV header
-	fmt.Fprintln(w, "id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at")
-	
-	// Write CSV rows
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	// csv.NewWriter handles quoting, escaping, and line endings for us.
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+
+	// Header row — must match the spec's column order exactly.
+	cw.Write([]string{"id", "name", "gender", "gender_probability", "age", "age_group", "country_id", "country_name", "country_probability", "created_at"})
+
 	for _, p := range result.Data {
-		fmt.Fprintf(w, "%s,%s,%s,%.2f,%d,%s,%s,%s,%.2f,%s\n",
-			p.ID, p.Name, p.Gender, p.GenderProbability, p.Age, p.AgeGroup,
-			p.CountryID, p.CountryName, p.CountryProbability, p.CreatedAt.Format(time.RFC3339))
+		cw.Write([]string{
+			p.ID,
+			p.Name,
+			p.Gender,
+			fmt.Sprintf("%.4f", p.GenderProbability),
+			fmt.Sprintf("%d", p.Age),
+			p.AgeGroup,
+			p.CountryID,
+			p.CountryName,
+			fmt.Sprintf("%.4f", p.CountryProbability),
+			p.CreatedAt.Format(time.RFC3339),
+		})
 	}
 }
 
-// auth middleware. //Access Control
-// All /api/* endpoints must:
-// Require authentication
-// Enforce role permissions
-// Do not implement scattered checks; use a structured approach.
-
-
-
-
-// auth/github -> GitHub login
-
-// auth/github/callback -> GitHub callback
-
-// auth/refresh -> Token refresh
-
-// auth/logout
-
-// users 
-
-func writeError(w http.ResponseWriter, message string, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: message})
-}
-
-
+// Whoami returns the full profile of the currently authenticated user.
+// GET /api/whoami
+// Auth: RequireAuth (any role)
 func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -386,12 +359,75 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user, err := h.service.GetUser(r.Context(), claims.UserID)
+	if err != nil || user == nil {
+		writeError(w, "user not found", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "success",
-		"user_id": claims.UserID,
-		"role": claims.Role,
+		"data": map[string]interface{}{
+			"id":            user.ID,
+			"username":      user.Username,
+			"email":         user.Email,
+			"avatar_url":    user.AvatarURL,
+			"role":          user.Role,
+			"last_login_at": user.LastLoginAt,
+		},
 	})
 }
 
-// main.go -> handlers -> services -> repository -> database
+// buildListResponse constructs the paginated list response including
+// total_pages and HATEOAS-style links (self / next / prev).
+//
+// Why compute links server-side? The client doesn't need to know the URL
+// structure — it can just follow links.next to paginate. This also means
+// changing the URL structure in future won't break clients.
+func buildListResponse(basePath string, r *http.Request, page, limit, total int, data []models.ProfilePayload) models.ProfileListResponse {
+	totalPages := (total + limit - 1) / limit // integer ceiling division
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	// Reconstruct the base URL, preserving all query params except page.
+	baseURL := "/api/" + basePath
+
+	makeLink := func(p int) *string {
+		q := r.URL.Query()
+		q.Set("page", fmt.Sprintf("%d", p))
+		q.Set("limit", fmt.Sprintf("%d", limit))
+		s := baseURL + "?" + q.Encode()
+		return &s
+	}
+
+	self := makeLink(page)
+	var next, prev *string
+	if page < totalPages {
+		next = makeLink(page + 1)
+	}
+	if page > 1 {
+		prev = makeLink(page - 1)
+	}
+
+	return models.ProfileListResponse{
+		Status:     "success",
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: totalPages,
+		Links: map[string]*string{
+			"self": self,
+			"next": next,
+			"prev": prev,
+		},
+		Data: data,
+	}
+}
+
+func writeError(w http.ResponseWriter, message string, statusCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: message})
+}
