@@ -107,6 +107,13 @@ func (s *Service) SeedProfile(ctx context.Context, p *models.SeedProfile) error 
 	return s.repo.SeedProfile(ctx, p)
 }
 
+// GetUser loads a user by their internal UUID.
+// Used by the /api/whoami handler so it can return full user details
+// beyond what's embedded in the JWT claims (e.g. email, avatar_url).
+func (s *Service) GetUser(ctx context.Context, id string) (*models.User, error) {
+	return s.repo.GetUserByID(ctx, id)
+}
+
 func (s *Service) fetchAllPredictions(ctx context.Context, name string) (*models.GenderResponse, *models.AgeResponse, *models.NationalizeResponse, error) {
 	var genderResult models.GenderResponse
 	var ageResult models.AgeResponse

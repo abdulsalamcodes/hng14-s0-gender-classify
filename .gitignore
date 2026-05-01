@@ -1,6 +1,9 @@
 # Environment
 .env
 
+# Local testing guide (personal paths, not for repo)
+TESTING.md
+
 # Binary output
 hng14-s0-gender-classify
 *.exe
