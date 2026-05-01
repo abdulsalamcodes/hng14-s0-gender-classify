@@ -81,11 +81,17 @@ func main() {
 		})
 	})
 
+	// Serve the web portal from the same origin so cookies work without cross-origin issues.
+	// /auth/* and /api/* routes above take precedence; everything else serves portal files.
+	if cfg.PortalDir != "" {
+		r.Handle("/*", http.FileServer(http.Dir(cfg.PortalDir)))
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	log.Printf("Server running on :%s", port)
+	log.Printf("Server running on :%s (portal: %s)", port, cfg.PortalDir)
 	log.Fatal(http.ListenAndServe(":"+port, r))
 }
