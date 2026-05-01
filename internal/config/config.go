@@ -20,6 +20,7 @@ type Config struct {
 	JWTRefreshSecret string
 
 	FrontendURL string
+	PortalDir   string
 }
 
 func Load() *Config {
@@ -36,7 +37,8 @@ func Load() *Config {
 		JWTSecret:        getEnv("JWT_SECRET", "change-me-access-secret"),
 		JWTRefreshSecret: getEnv("JWT_REFRESH_SECRET", "change-me-refresh-secret"),
 
-		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:3000"),
+		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:8080"),
+		PortalDir:   getEnv("PORTAL_DIR", "../insighta-portal"),
 	}
 }
 

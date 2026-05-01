@@ -12,6 +12,30 @@ import (
 	"hng14-s0-gender-classify/internal/services"
 )
 
+// isSecure returns true when the request arrived over HTTPS (direct TLS or via proxy).
+func isSecure(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+// cookie returns a cookie with SameSite=None;Secure on HTTPS (required for cross-origin),
+// and SameSite=Lax on HTTP (local dev).
+func newCookie(r *http.Request, name, value string, maxAge int, httpOnly bool) *http.Cookie {
+	secure := isSecure(r)
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
+	return &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: httpOnly,
+		Secure:   secure,
+		SameSite: sameSite,
+		MaxAge:   maxAge,
+	}
+}
+
 type pendingState struct {
 	codeChallenge  string
 	source         string
@@ -117,33 +141,12 @@ func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "access_token",
-		Value:    accessToken,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(services.AccessTokenDuration.Seconds()),
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    refreshToken,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(services.RefreshTokenDuration.Seconds()),
-	})
+	http.SetCookie(w, newCookie(r, "access_token", accessToken, int(services.AccessTokenDuration.Seconds()), true))
+	http.SetCookie(w, newCookie(r, "refresh_token", refreshToken, int(services.RefreshTokenDuration.Seconds()), true))
 
 	csrfBytes := make([]byte, 16)
 	rand.Read(csrfBytes) //nolint:errcheck
-	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf_token",
-		Value:    hex.EncodeToString(csrfBytes),
-		Path:     "/",
-		HttpOnly: false,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(services.AccessTokenDuration.Seconds()),
-	})
+	http.SetCookie(w, newCookie(r, "csrf_token", hex.EncodeToString(csrfBytes), int(services.AccessTokenDuration.Seconds()), false))
 
 	http.Redirect(w, r, h.frontendURL+"/#dashboard", http.StatusTemporaryRedirect)
 }
@@ -170,22 +173,8 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if cookieErr == nil {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "access_token",
-			Value:    accessToken,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   int(services.AccessTokenDuration.Seconds()),
-		})
-		http.SetCookie(w, &http.Cookie{
-			Name:     "refresh_token",
-			Value:    refreshToken,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   int(services.RefreshTokenDuration.Seconds()),
-		})
+		http.SetCookie(w, newCookie(r, "access_token", accessToken, int(services.AccessTokenDuration.Seconds()), true))
+		http.SetCookie(w, newCookie(r, "refresh_token", refreshToken, int(services.RefreshTokenDuration.Seconds()), true))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
